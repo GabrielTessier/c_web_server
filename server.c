@@ -4,9 +4,8 @@
 #include <string.h>
 #include <sys/socket.h>
 
-#define __WEBLIB_IMPL
+#define WEBLIB_IMPLEMENTATION
 #include "weblib.h"
-#undef __WEBLIB_IMPL
 
 // send_file
 #include <fcntl.h>

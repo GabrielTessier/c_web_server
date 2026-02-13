@@ -47,10 +47,8 @@ int start_server(server_t *serv);
 void stop_server(server_t *serv);
 void free_server(server_t *serv);
 
-#endif
 
-
-#ifdef __WEBLIB_IMPL
+#ifdef WEBLIB_IMPLEMENTATION
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -314,4 +312,5 @@ void free_server(server_t *serv) {
   free(serv);
 }
 
-#endif
+#endif // WEBLIB_IMPLEMENTATION
+#endif // __WEBLIB_H
