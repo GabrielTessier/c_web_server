@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test</title>
+  </head>
+  <body>
+
+    <p>AAAA</p>
+
+    <script>
+     const base_url = window.location.origin;
+
+     const ws = new WebSocket("ws://"+ window.location.hostname + ":1234");
+
+     function valider() {
+       ws.send("validate");
+     }
+
+     ws.onmessage = (event) => {
+       console.log(event);
+       //if (event.data === "validate")
+     };
+    </script>
+  </body>
+</html>

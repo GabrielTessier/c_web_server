@@ -1,13 +1,12 @@
+
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <string.h>
-#include <errno.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <signal.h>
-#include <pthread.h>
+#include <sys/socket.h>
+
+#define __WEBLIB_IMPL
+#include "weblib.h"
+#undef __WEBLIB_IMPL
 
 // send_file
 #include <fcntl.h>
@@ -17,27 +16,8 @@
 // get
 #include <sys/stat.h>
 
-#define NB_CONNECTION 4
-#define OVER_BUF 4
-
-int keep_running = 1;
-int listen_fd;
-
-int connections_fd[NB_CONNECTION];
-pthread_mutex_t fds_mutex;
-
-void intHandler(int dummy) {
-  keep_running = 0;
-  close(listen_fd);
-  pthread_mutex_lock(&fds_mutex);
-  for (int i=0; i<NB_CONNECTION; i++) {
-    if (connections_fd[i] >= 0) {
-      printf("close %d\n", i);
-      close(connections_fd[i]);
-    }
-  }
-  exit(0);
-}
+server_t *http;
+server_t *websocket;
 
 // Source - https://stackoverflow.com/a/779960
 // Posted by jmucchiello, modified by community. See post 'Timeline' for change history
@@ -175,175 +155,32 @@ void get(int fd, char *file) {
   case S_IFREG:  send_file(fd, file);          break;
   default:       send_404(fd);                 break;
   }
-  /* if (file[1] == 0) { */
-  /*   //send(fd, "HTTP/1.0 200 OK\nContent-Type: text/html\nContent-Length: 93\n\n<!DOCTYPE html><html><head><title>TEST</title></head><body><h1>TOTO</h1></body></html>", 146, 0); */
-  /*   char *str = "HTTP/1.0 200 OK\nContent-Type: text/html\n\n<!DOCTYPE html><html><head><title>TEST</title></head><body><h1>TOTO</h1></body></html>"; */
-  /*   send(fd, str, strlen(str), 0); */
-  /* } else { */
-  /*   send(fd, "else", 4, 0); */
-  /* } */
 
   free(file);
 }
 
-struct connection_args_s {
-  int fd;
-  int number;
-  int index;
-};
-typedef struct connection_args_s connection_args_t;
-
-void* connection(void *args) {
-  connection_args_t *param = (connection_args_t*) args;
-  int connection_fd = param->fd;
-
-  //start_read:
-  char full_buffer[100 + OVER_BUF];
-  memset(full_buffer, 'a', 100+OVER_BUF);
-  char *buffer = full_buffer+OVER_BUF;
-  char get_str[100];
-  int getOff = 0;
-  while (keep_running) {
-    ssize_t size = read(connection_fd, buffer, 100);
-    //printf("\n\"%ld\"\n", size);
-    if (size == 0) {
-      break;
-    }
-    char *getpos = strstr(full_buffer, "GET");
-    //printf("\n\nFULL:\n\"%s\"\nENDFULL\n\n", full_buffer);
-    if (getOff) {
-      getpos = buffer;
-    }
-    if (getpos) {
-      //printf("@");
-      char *end = strchr(getpos, '\n');
-      if (end) {
-        ssize_t getsize = end-getpos;
-        strncpy(get_str+getOff, getpos, getsize);
-        get_str[getOff+getsize] = 0;
-        //printf("%s\n", get_str);
-        fflush(stdout);
-        getOff = 0;
-      } else {
-        ssize_t getsize = (size+OVER_BUF) - (getpos - full_buffer);
-        strncpy(get_str+getOff, getpos, getsize);
-        getOff += getsize;
-      }
-    }
-
-    if (strstr(full_buffer, "\r\n\r\n") || strstr(full_buffer, "\n\n")) {
-      //printf("END, -> send\n");
-      fflush(stdout);
-      char *file = strchr(get_str, ' ');
-      if (file) {
-        file++;
-        *(strchr(file, ' ')) = 0;
-        printf("FILE : \"%s\"\n", file);
-        get(connection_fd, file);
-      }
-      //close(connection_fd);
-      //goto acc;
-      //goto start_read;
-      break;
-    }
-
-    buffer[size] = 0;
-    for (int i=0; i<OVER_BUF; i++) {
-      full_buffer[i] = buffer[size-OVER_BUF+i];
-    }
-    /* for (ssize_t i=0; i<size; i++) { */
-    /*   printf("%d, ", buffer[i]); */
-    /* } */
+void req(int fd, request_t *request) {
+  switch (request->method) {
+  case M_GET: get(fd, request->uri); break;
+  default: break;
   }
-  pthread_mutex_lock(&fds_mutex);
-  connections_fd[param->index] = -1;
-  pthread_mutex_unlock(&fds_mutex);
-  printf("END connection %d (fd: %d, index: %d)\n", param->number, connection_fd, param->index);
-  close(connection_fd);
-  free(args);
-  pthread_exit(NULL);
+}
+
+void intHandler(int dummy) {
+  stop_server(http);
+  free_server(http);
+
+  stop_server(websocket);
+  free_server(websocket);
 }
 
 int main(void) {
   signal(SIGINT, intHandler);
-
-  //int fd = socket(AF_INET, SOCK_STREAM, PF_INET);
-  listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (listen_fd == -1) {
-    fprintf(stderr, "socket failed : %d\n", errno);
-    exit(EXIT_FAILURE);
-  }
-
-  if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
-    fprintf(stderr, "setsockopt(SO_REUSEADDR) failed\n");
-    exit(EXIT_FAILURE);
-  }
-
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(6767);
-  addr.sin_addr.s_addr = (in_addr_t) 0x0100007f; // 127.0.0.1
-  printf("IP address: %s\n",inet_ntoa(addr.sin_addr));
-  if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr)) == -1) {
-    fprintf(stderr, "bind failed : %d\n", errno);
-    close(listen_fd);
-    exit(EXIT_FAILURE);
-  }
-  if (listen(listen_fd, NB_CONNECTION) == -1) {
-    fprintf(stderr, "listen failed : %d\n", errno);
-    close(listen_fd);
-    exit(EXIT_FAILURE);
-  }
-
-  memset(connections_fd, -1, NB_CONNECTION * sizeof(int));
-  int connection_number = 1;
-
-  while (keep_running) {
-    struct sockaddr_in connection_addr;
-    socklen_t connection_addr_size;
-    connection_addr_size = sizeof(connection_addr);
-    int connection_fd = accept(listen_fd, (struct sockaddr *) &connection_addr, &connection_addr_size);
-    if (connection_fd  == -1) {
-      fprintf(stderr, "accept failed : %d\n", errno);
-      close(listen_fd);
-      exit(EXIT_FAILURE);
-    }
-    int index = -1;
-    pthread_mutex_lock(&fds_mutex);
-    for (int i=0; i<NB_CONNECTION; i++) {
-      if (connections_fd[i] == -1) {
-        index = i;
-        break;
-      }
-    }
-    pthread_mutex_unlock(&fds_mutex);
-    if (index < 0) {
-      fprintf(stderr, "invalid index (no connection)\n");
-      close(connection_fd);
-      continue;
-    }
-    pthread_mutex_lock(&fds_mutex);
-    connections_fd[index] = connection_fd;
-    pthread_mutex_unlock(&fds_mutex);
-
-    pthread_t thread;
-    connection_args_t *args = (connection_args_t*) malloc(sizeof(connection_args_t));
-    args->fd = connection_fd;
-    args->number = connection_number++;
-    args->index = index;
-    int err = pthread_create(&thread, NULL, connection, args);
-    if (err) {
-      pthread_mutex_lock(&fds_mutex);
-      connections_fd[index] = -1;
-      pthread_mutex_unlock(&fds_mutex);
-      fprintf(stderr, "pthread_create failed : %d\n", err);
-      close(connection_fd);
-      continue;
-    }
-    printf("START connection %d (fd: %d, index: %d)\n", args->number, args->fd, args->index);
-  }
-
-  close(listen_fd);
-  return 0;
+  http = init_server((int[4]){127, 0, 1, 1}, 6767);
+  http->request = req;
+  websocket = init_server((int[4]){127, 0, 1, 1}, 1234); // ws
+  http->log = true;
+  pthread_t thread;
+  start_server_async(&thread, http);
+  start_server(websocket);
 }
