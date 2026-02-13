@@ -75,78 +75,97 @@ struct connection_args_s {
 };
 typedef struct connection_args_s connection_args_t;
 
+enum method_e get_method(char *buffer) {
+  // TODO
+  return M_GET;
+}
+
 void* connection(void *args) {
   connection_args_t *param = (connection_args_t*) args;
   server_t *serv = param->serv;
   int connection_fd = serv->connections_fd[param->index];
 
-  //start_read:
   char full_buffer[BUF_SIZE + OVER_BUF];
-  memset(full_buffer, 'a', BUF_SIZE+OVER_BUF);
-  char *buffer = full_buffer+OVER_BUF;
-  char get_str[URL_SIZE];
-  int getOff = 0;
-  while (serv->keep_running) {
-    ssize_t size = read(connection_fd, buffer, BUF_SIZE);
-    //printf("\n\"%ld\"\n", size);
-    if (size == 0) {
-      break;
-    }
-    char *getpos = strstr(full_buffer, "GET");
-    if (serv->log) printf("\n\nFULL:\n\"%s\"\nENDFULL\n\n", full_buffer);
-    if (getOff) {
-      getpos = buffer;
-    }
-    if (getpos) {
-      //printf("@");
-      char *end = strchr(getpos, '\n');
-      if (end) {
-        ssize_t getsize = end-getpos;
-        strncpy(get_str+getOff, getpos, getsize);
-        get_str[getOff+getsize] = 0;
-        //printf("%s\n", get_str);
-        fflush(stdout);
-        getOff = 0;
-      } else {
-        ssize_t getsize = (size+OVER_BUF) - (getpos - full_buffer);
-        strncpy(get_str+getOff, getpos, getsize);
-        getOff += getsize;
-      }
-    }
-
-    if (strstr(full_buffer, "\r\n\r\n") || strstr(full_buffer, "\n\n")) {
-      //printf("END, -> send\n");
-      fflush(stdout);
-      char *file = strchr(get_str, ' ');
-      if (file) {
-        file++;
-        *(strchr(file, ' ')) = 0;
-        if (serv->log) printf("FILE : \"%s\"\n", file);
-        request_t req = {
-          .method = M_GET,
-          .uri = file,
-          .headers = {0}
-        };
-        if (serv->request != NULL) {
-          serv->request(connection_fd, &req);
-        } else {
-          fprintf(stderr, "No request function for %s on port %d\n", inet_ntoa((struct in_addr){serv->ip}), serv->port);
-        }
-      }
-      //close(connection_fd);
-      //goto acc;
-      //goto start_read;
-      break;
-    }
-
-    buffer[size] = 0;
-    for (int i=0; i<OVER_BUF; i++) {
-      full_buffer[i] = buffer[size-OVER_BUF+i];
-    }
-    /* for (ssize_t i=0; i<size; i++) { */
-    /*   printf("%d, ", buffer[i]); */
-    /* } */
+  for (int i=0; i<OVER_BUF; i++) {
+    full_buffer[i] = 'a';
   }
+  //memset(full_buffer, 'a', BUF_SIZE+OVER_BUF);
+  char *buffer = full_buffer+OVER_BUF;
+  char uri[URL_SIZE];
+  int methodOff = 0;
+
+  /* https://datatracker.ietf.org/doc/html/rfc2616#section-5
+   * Request = Request-Line              ; Section 5.1
+   *           *(( general-header        ; Section 4.5
+   *            | request-header         ; Section 5.3
+   *            | entity-header ) CRLF)  ; Section 7.1
+   *           CRLF
+   *           [ message-body ]          ; Section 4.3
+   *
+   * Request-Line = Method SP Request-URI SP HTTP-Version CRLF
+   */
+  ssize_t read_size = read(connection_fd, buffer, BUF_SIZE);
+  buffer[read_size] = 0;
+  enum method_e method = get_method(buffer);
+  char *uriStart;
+  switch (method) {
+  case M_GET: uriStart = buffer + 4; break;
+  case M_POST: uriStart = buffer + 5; break;
+  default: goto end;
+  }
+
+  size_t alreadyPaste = 0;
+ copyuri:
+  char *uriEnd = strchr(uriStart, ' ');
+  if (uriEnd) {
+    size_t uriPartSize = uriEnd - uriStart;
+    size_t uriSize = alreadyPaste + uriPartSize;
+    if (uriSize > URL_SIZE) {
+      fprintf(stderr, "Uri trop longue\n");
+      goto end;
+    }
+    *uriEnd = 0;
+    strcpy(uri + alreadyPaste, uriStart);
+    *uriEnd = ' ';
+    alreadyPaste = uriSize;
+  } else {
+    size_t uriPartSize = BUF_SIZE - (uriStart - buffer);
+    size_t uriSize = alreadyPaste + uriPartSize;
+    char *uriEnd = uriStart + uriPartSize;
+    if (uriSize > URL_SIZE) {
+      fprintf(stderr, "Uri trop longue\n");
+      goto end;
+    }
+    *uriEnd = 0;
+    strcpy(uri + alreadyPaste, uriStart);
+    alreadyPaste = uriSize;
+    read_size = read(connection_fd, buffer, BUF_SIZE);
+    uriStart = buffer;
+    goto copyuri;
+  }
+
+  printf("URI : \"%s\"\n", uri);
+
+  // TODO read header
+  while (!strstr(full_buffer, "\r\n\r\n") && !strstr(full_buffer, "\n\n")) {
+    for (int i=0; i<OVER_BUF; i++) {
+      full_buffer[i] = buffer[read_size-OVER_BUF+i];
+    }
+    read_size = read(connection_fd, buffer, BUF_SIZE);
+  }
+
+  request_t req = {
+    .method = M_GET,
+    .uri = uri,
+    .headers = {0}    // TODO
+  };
+  if (serv->request != NULL) {
+    serv->request(connection_fd, &req);
+  } else {
+    fprintf(stderr, "No request function for %s on port %d\n", inet_ntoa((struct in_addr){serv->ip}), serv->port);
+  }
+
+ end:
   pthread_mutex_lock(&(serv->fds_mutex));
   serv->connections_fd[param->index] = -1;
   pthread_mutex_unlock(&(serv->fds_mutex));

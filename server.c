@@ -74,7 +74,7 @@ void send_404(int fd) {
   send(fd, str, strlen(str), 0);
 }
 
-void send_file(int fd, char *file_path) {
+void send_file(int fd, char *file_path, struct stat *sb) {
   FILE *file_stream = fopen(file_path, "r");
   if (file_stream) {
     size_t file_path_size = strlen(file_path);
@@ -82,27 +82,35 @@ void send_file(int fd, char *file_path) {
     printf("FF : \"%s\", \"%s\"\n", file_path, file_path + file_path_size - 4);
     if (strncmp(file_path + file_path_size - 4, "html", 4) == 0) {
       printf("HTML\n");
-      header = "HTTP/1.0 200 OK\nContent-Type: text/html\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: text/html\n";
     } else if (strncmp(file_path + file_path_size - 3, "css", 3) == 0) {
-      header = "HTTP/1.0 200 OK\nContent-Type: text/css\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: text/css\n";
     } else if (strncmp(file_path + file_path_size - 2, "js", 2) == 0) {
-      header = "HTTP/1.0 200 OK\nContent-Type: application/javascript\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: application/javascript\n";
     } else if (strncmp(file_path + file_path_size - 4, "jpeg", 4) == 0) {
-      header = "HTTP/1.0 200 OK\nContent-Type: image/jpeg\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: image/jpeg\n";
     } else if (strncmp(file_path + file_path_size - 3, "png", 3) == 0) {
-      header = "HTTP/1.0 200 OK\nContent-Type: image/png\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: image/png\n";
     } else if (strncmp(file_path + file_path_size - 3, "svg", 3) == 0) {
-      header = "HTTP/1.0 200 OK\nContent-Type: image/svg+xml\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: image/svg+xml\n";
     } else {
-      header = "HTTP/1.0 200 OK\nContent-Type: text/plain\n\n";
+      header = "HTTP/1.0 200 OK\nContent-Type: text/plain\n";
     }
     send(fd, header, strlen(header), 0);
+    header = "Content-Length: ";
+    send(fd, header, strlen(header), 0);
+    char strSize[1000];
+    snprintf(strSize, 1000, "%ld", sb->st_size);
+    send(fd, strSize, strlen(strSize), 0);
+    send(fd, "\r\n\r\n", 4, 0);
 
     char buf[100];
     int size = 0;
     while ((size = fread(buf, 1, 100, file_stream))) {
       buf[size] = 0;
-      send(fd, buf, size, 0);
+      if (send(fd, buf, size, 0) < 0) {
+        fprintf(stderr, "send failed : %d\n", errno);
+      }
     }
   } else {
     send_404(fd);
@@ -151,8 +159,8 @@ void get(int fd, char *file) {
   // stat fournit la taille des fichiers (peut-être l'utiliser pour load d'un coup)
   switch (sb.st_mode & S_IFMT) {
   case S_IFDIR:  send_dir(fd, file, &sb);      break;
-  case S_IFLNK:  send_file(fd, file);          break;
-  case S_IFREG:  send_file(fd, file);          break;
+  case S_IFLNK:  send_file(fd, file, &sb);     break;
+  case S_IFREG:  send_file(fd, file, &sb);     break;
   default:       send_404(fd);                 break;
   }
 
@@ -178,8 +186,8 @@ int main(void) {
   signal(SIGINT, intHandler);
   http = init_server((int[4]){127, 0, 1, 1}, 6767);
   http->request = req;
-  websocket = init_server((int[4]){127, 0, 1, 1}, 1234); // ws
   http->log = true;
+  websocket = init_server((int[4]){127, 0, 1, 1}, 1234); // ws
   pthread_t thread;
   start_server_async(&thread, http);
   start_server(websocket);
