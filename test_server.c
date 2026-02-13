@@ -14,6 +14,8 @@
 #include <dirent.h>
 // get
 #include <sys/stat.h>
+// req
+#include <unistd.h>
 
 server_t *http;
 server_t *websocket;
@@ -69,7 +71,7 @@ void send_file(int fd, char *file_path, struct stat *sb) {
   }
 }
 
-void send_dir(int fd, char *dir_path, struct stat *sb) {
+void send_dir(int fd, char *uri, char *dir_path, struct stat *sb) {
   DIR *dirp = opendir(dir_path);
   if (!dirp) {
     send_404(fd);
@@ -86,8 +88,9 @@ void send_dir(int fd, char *dir_path, struct stat *sb) {
     size_t ent_size = strlen(ent->d_name);
     str = "<a href=\"";
     send(fd, str, strlen(str), 0);
-    send(fd, dir_path, dire_path_len, 0);
-    if (dir_path[dire_path_len-1] != '/') {
+    size_t uri_size = strlen(uri);
+    send(fd, uri, uri_size, 0);
+    if (uri[uri_size-1] != '/') {
       send(fd, "/", 1, 0);
     }
     send(fd, ent->d_name, ent_size, 0);
@@ -100,8 +103,12 @@ void send_dir(int fd, char *dir_path, struct stat *sb) {
   closedir(dirp);
 }
 
-void get(int fd, char *file) {
-  file = str_replace(file, "%20", " ");
+void get(int fd, request_t *request) {
+  char file_path[PATH_MAX+1];
+  getcwd(file_path, PATH_MAX);
+  strncat(file_path, request->uri, PATH_MAX - strlen(file_path));
+
+  char *file = str_replace(file_path, "%20", " ");
   struct stat sb;
   if (lstat(file, &sb) == -1) {
     send_404(fd);
@@ -110,7 +117,7 @@ void get(int fd, char *file) {
   }
   // stat fournit la taille des fichiers (peut-être l'utiliser pour load d'un coup)
   switch (sb.st_mode & S_IFMT) {
-  case S_IFDIR:  send_dir(fd, file, &sb);      break;
+  case S_IFDIR:  send_dir(fd, request->uri, file, &sb);      break;
   case S_IFLNK:  send_file(fd, file, &sb);     break;
   case S_IFREG:  send_file(fd, file, &sb);     break;
   default:       send_404(fd);                 break;
@@ -121,7 +128,7 @@ void get(int fd, char *file) {
 
 void req(int fd, request_t *request) {
   switch (request->method) {
-  case M_GET: get(fd, request->uri); break;
+  case M_GET: get(fd, request); break;
   default: break;
   }
 }
