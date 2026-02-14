@@ -12,12 +12,55 @@ enum method_e {M_UNDEFINED = 0,
                M_OPTIONS, M_GET, M_HEAD, M_POST, M_PUT, M_DELETE, M_TRACE, M_CONNECT};
 
 enum header_e {
-  HEADER_CACHE_CONTROL = 0, HEADER_CONNECTION, HEADER_DATE, HEADER_PRAGMA, HEADER_TRAILER, HEADER_TRANSFER_ENCODING, HEADER_UPGRADE, HEADER_VIA, HEADER_WARNING, // general header
-  HEADER_ACCEPT, HEADER_ACCEPT_CHARSET, HEADER_ACCEPT_ENCODING, HEADER_ACCEPT_LANGUAGE, HEADER_AUTHORIZATION, HEADER_EXPECT, HEADER_FROM, HEADER_HOST, HEADER_IF_MATCH, HEADER_IF_MODIFIED_SINCE, HEADER_IF_NONE_MATCH, HEADER_IF_RANGE, HEADER_IF_UNMODIFIED_SINCE, HEADER_MAX_FORWARDS, HEADER_PROXY_AUTHORIZATION, HEADER_RANGE, HEADER_REFERER, HEADER_TE, HEADER_USER_AGENT,  // request header
-  HEADER_ALLOW, HEADER_CONTENT_ENCODING, HEADER_CONTENT_LANGUAGE, HEADER_CONTENT_LENGTH, HEADER_CONTENT_LOCATION, HEADER_CONTENT_MD5, HEADER_CONTENT_RANGE, HEADER_CONTENT_TYPE, HEADER_EXPIRES, HEADER_LAST_MODIFIED, HEADER_EXTENSION_HEADER, // entity header
+  // general header
+  HEADER_CACHE_CONTROL = 0,
+  HEADER_CONNECTION,
+  HEADER_DATE,
+  HEADER_PRAGMA,
+  HEADER_TRAILER,
+  HEADER_TRANSFER_ENCODING,
+  HEADER_UPGRADE,
+  HEADER_VIA,
+  HEADER_WARNING,
+
+  // request header
+  HEADER_ACCEPT,
+  HEADER_ACCEPT_CHARSET,
+  HEADER_ACCEPT_ENCODING,
+  HEADER_ACCEPT_LANGUAGE,
+  HEADER_AUTHORIZATION,
+  HEADER_EXPECT,
+  HEADER_FROM,
+  HEADER_HOST,
+  HEADER_IF_MATCH,
+  HEADER_IF_MODIFIED_SINCE,
+  HEADER_IF_NONE_MATCH,
+  HEADER_IF_RANGE,
+  HEADER_IF_UNMODIFIED_SINCE,
+  HEADER_MAX_FORWARDS,
+  HEADER_PROXY_AUTHORIZATION,
+  HEADER_RANGE,
+  HEADER_REFERER,
+  HEADER_TE,
+  HEADER_USER_AGENT,
+
+  // entity header
+  HEADER_ALLOW,
+  HEADER_CONTENT_ENCODING,
+  HEADER_CONTENT_LANGUAGE,
+  HEADER_CONTENT_LENGTH,
+  HEADER_CONTENT_LOCATION,
+  HEADER_CONTENT_MD5,
+  HEADER_CONTENT_RANGE,
+  HEADER_CONTENT_TYPE,
+  HEADER_EXPIRES,
+  HEADER_LAST_MODIFIED,
+  HEADER_EXTENSION_HEADER,
 
   MAX_HEADER
 };
+
+#define MAX_HEADER_SIZE 20
 
 //enum header_type_e {HT_GENERAL, HT_REQUEST, HT_ENTITY};
 
@@ -29,6 +72,7 @@ enum header_e {
 struct request_s {
   enum method_e method;
   char *uri;
+  char *http_version;
   char *headers[MAX_HEADER];
 };
 typedef struct request_s request_t;
@@ -48,7 +92,7 @@ struct server_s {
 };
 typedef struct server_s server_t;
 
-server_t* init_server(const char *name, int ipv4[4], int port);
+server_t* init_server(char *name, int ipv4[4], int port);
 int start_server_async(pthread_t *thread, server_t *serv);
 int start_server(server_t *serv);
 void stop_server(server_t *serv);
@@ -69,8 +113,10 @@ void free_server(server_t *serv);
 #include <pthread.h>
 #include <stdarg.h>
 
-#define BUF_SIZE 1000
-#define OVER_BUF 4
+//#define BUF_SIZE 1000
+#define BUF_SIZE 5
+//#define OVER_BUF 4
+#define OVER_BUF 3
 #define URL_SIZE 2000
 
 struct connection_args_s {
@@ -140,13 +186,26 @@ void* connection(void *args) {
   int connection_fd = serv->connections_fd[param->index];
 
   char full_buffer[BUF_SIZE + OVER_BUF];
-  for (int i=0; i<OVER_BUF; i++) {
-    full_buffer[i] = 'a';
-  }
-  //memset(full_buffer, 'a', BUF_SIZE+OVER_BUF);
+  //for (int i=0; i<OVER_BUF; i++) {
+  //  full_buffer[i] = 'a';
+  //}
+  memset(full_buffer, 'a', BUF_SIZE+OVER_BUF);
   char *buffer = full_buffer+OVER_BUF;
   char uri[URL_SIZE];
-  int methodOff = 0;
+  //int methodOff = 0;
+  char *headerStart = NULL;
+
+  size_t read_size = 0;
+
+#define read_data()                                             \
+  do {                                                          \
+    for (int i=0; i<OVER_BUF; i++) {                            \
+      full_buffer[i] = buffer[read_size-OVER_BUF+i];            \
+    }                                                           \
+    read_size = read(connection_fd, buffer, BUF_SIZE);          \
+    buffer[read_size] = 0;                                      \
+  } while (0);
+
 
   /* https://datatracker.ietf.org/doc/html/rfc2616#section-5
    * Request = Request-Line              ; Section 5.1
@@ -158,8 +217,7 @@ void* connection(void *args) {
    *
    * Request-Line = Method SP Request-URI SP HTTP-Version CRLF
    */
-  ssize_t read_size = read(connection_fd, buffer, BUF_SIZE);
-  buffer[read_size] = 0;
+  read_data();
   enum method_e method = get_method(buffer);
   char *uriStart;
   switch (method) {
@@ -169,6 +227,16 @@ void* connection(void *args) {
   }
 
   server_log_info(serv, "Method : %s", method_to_string(method));
+
+  if (uriStart > buffer + BUF_SIZE) {
+    size_t over = uriStart - (buffer + BUF_SIZE);
+    while (over > BUF_SIZE) {
+      read_data();
+      over -= BUF_SIZE;
+    }
+    read_data();
+    uriStart = buffer + over;
+  }
 
   size_t alreadyPaste = 0;
  copyuri:
@@ -185,7 +253,7 @@ void* connection(void *args) {
     *uriEnd = ' ';
     alreadyPaste = uriSize;
   } else {
-    size_t uriPartSize = BUF_SIZE - (uriStart - buffer);
+    size_t uriPartSize = read_size - (uriStart - buffer);
     size_t uriSize = alreadyPaste + uriPartSize;
     char *uriEnd = uriStart + uriPartSize;
     if (uriSize > URL_SIZE) {
@@ -195,24 +263,65 @@ void* connection(void *args) {
     *uriEnd = 0;
     strcpy(uri + alreadyPaste, uriStart);
     alreadyPaste = uriSize;
-    read_size = read(connection_fd, buffer, BUF_SIZE);
+    read_data();
     uriStart = buffer;
     goto copyuri;
   }
 
   server_log_info(serv, "URI : \"%s\"", uri);
 
-  // TODO read header
-  while (!strstr(full_buffer, "\r\n\r\n") && !strstr(full_buffer, "\n\n")) {
-    for (int i=0; i<OVER_BUF; i++) {
-      full_buffer[i] = buffer[read_size-OVER_BUF+i];
+  //read http version, uriEnd : "SP HTTP-Version CRLF ..."
+  uriEnd++;
+  char *new_line = strstr(uriEnd, "\r\n");
+  char *http_version;
+  if (new_line) {
+    size_t length = new_line - uriEnd + 1;
+    http_version = (char*) malloc(sizeof(char) * length);
+    strncpy(http_version, uriEnd, length-1);
+    http_version[length-1] = 0;
+  } else {
+    size_t length = read_size - (uriEnd - buffer) + 1;
+    http_version = (char*) malloc(sizeof(char) * length);
+    strncpy(http_version, uriEnd, length-1);
+    http_version[length-1] = 0;
+    while (1) {
+      read_data();
+      char *new_line = strstr(full_buffer, "\r\n");
+      if (new_line) {
+        size_t added_length = new_line - buffer;
+        size_t newlength = length + added_length;
+        if (added_length <= 0) {
+          http_version[newlength-1] = 0;
+        } else {
+          http_version = realloc(http_version, newlength);
+          strncpy(http_version + length - 1, buffer, added_length);
+          http_version[newlength-1] = 0;
+        }
+        headerStart = buffer + added_length + 2; // +2 for \r\n
+        length = newlength;
+        break;
+      } else {
+        size_t newlength = length + read_size;
+        http_version = realloc(http_version, newlength);
+        strncpy(http_version + length - 1, buffer, read_size);
+        http_version[newlength-1] = 0;
+        length = newlength;
+      }
     }
-    read_size = read(connection_fd, buffer, BUF_SIZE);
+  }
+
+  server_log_info(serv, "HTTP version : \"%s\"", http_version);
+
+  // TODO read header
+
+  while (!strstr(full_buffer, "\r\n\r\n") && !strstr(full_buffer, "\n\n")) {
+    read_data();
   }
 
   request_t req = {
     .method = M_GET,
     .uri = uri,
+    .http_version = http_version,
     .headers = {0}    // TODO
   };
   if (serv->request != NULL) {
@@ -220,6 +329,8 @@ void* connection(void *args) {
   } else {
     server_log_error(serv, "No request function");
   }
+
+  free(http_version);
 
  end:
   pthread_mutex_lock(&(serv->fds_mutex));
@@ -239,7 +350,7 @@ int ip_to_int(int ipbytes[4]) {
   return a+b+c+d;
 }
 
-server_t* init_server(const char *name, int ipv4[4], int port) {
+server_t* init_server(char *name, int ipv4[4], int port) {
   server_t *serv = (server_t *)malloc(sizeof(server_t));
   serv->name = name;
   serv->ip = ip_to_int(ipv4);
