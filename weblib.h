@@ -202,7 +202,7 @@ void* connection(void *args) {
   if (serv->request != NULL) {
     serv->request(connection_fd, &req);
   } else {
-    server_log_error(serv, "No request function for %s on port %d", inet_ntoa((struct in_addr){serv->ip}), serv->port);
+    server_log_error(serv, "No request function");
   }
 
  end:
@@ -276,8 +276,7 @@ int start_server(server_t *serv) {
   addr.sin_family = AF_INET;
   addr.sin_port = htons(serv->port);
   addr.sin_addr.s_addr = serv->ip;
-  server_log_info(serv, "IP address: %s", inet_ntoa(addr.sin_addr));
-  server_log_info(serv, "Port : %d", serv->port);
+  server_log_info(serv, "Start %s:%d", inet_ntoa(addr.sin_addr), serv->port);
   if (bind(serv->listen_fd, (struct sockaddr*) &addr, sizeof(addr)) == -1) {
     server_log_error(serv, "bind failed : %d", errno);
     close(serv->listen_fd);
