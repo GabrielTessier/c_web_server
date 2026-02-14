@@ -135,19 +135,27 @@ void req(int fd, request_t *request) {
 
 void intHandler(int dummy) {
   stop_server(http);
-  free_server(http);
-
   stop_server(websocket);
-  free_server(websocket);
 }
 
 int main(void) {
   signal(SIGINT, intHandler);
-  http = init_server((int[4]){127, 0, 1, 1}, 6767);
+  http = init_server("http", (int[4]){127, 0, 1, 1}, 6767);
   http->request = req;
-  http->log = true;
-  websocket = init_server((int[4]){127, 0, 1, 1}, 1234); // ws
+  http->log = SERVER_LOG_INFO | SERVER_LOG_ERROR;
+  websocket = init_server("websocket", (int[4]){127, 0, 1, 1}, 1234); // ws
+  websocket->log = SERVER_LOG_INFO | SERVER_LOG_ERROR;
+
   pthread_t thread;
   start_server_async(&thread, http);
   start_server(websocket);
+
+  // Here websocket is close
+
+  // wait for http to be close
+  pthread_join(thread, NULL);
+
+  // free server struct
+  free_server(http);
+  free_server(websocket);
 }

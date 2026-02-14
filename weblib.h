@@ -2,9 +2,14 @@
 #define __WEBLIB_H
 
 #include <pthread.h>
-#include <stdbool.h>
 
-enum method_e {M_OPTIONS, M_GET, M_HEAD, M_POST, M_PUT, M_DELETE, M_TRACE, M_CONNECT};
+enum server_log_e {
+  SERVER_LOG_INFO = 1<<0,
+  SERVER_LOG_ERROR = 1<<1
+};
+
+enum method_e {M_UNDEFINED = 0,
+               M_OPTIONS, M_GET, M_HEAD, M_POST, M_PUT, M_DELETE, M_TRACE, M_CONNECT};
 
 enum header_e {
   HEADER_CACHE_CONTROL = 0, HEADER_CONNECTION, HEADER_DATE, HEADER_PRAGMA, HEADER_TRAILER, HEADER_TRANSFER_ENCODING, HEADER_UPGRADE, HEADER_VIA, HEADER_WARNING, // general header
@@ -29,19 +34,21 @@ struct request_s {
 typedef struct request_s request_t;
 
 struct server_s {
+  char *name;
   int ip;
   int port;
+  pthread_t *thread; // NULL if not in async
   int keep_running;
   int nb_connection;
   int listen_fd;
   int *connections_fd; // size : nb_connection
   pthread_mutex_t fds_mutex;
-  bool log;
+  enum server_log_e log;
   void (*request)(int fd, request_t *req);
 };
 typedef struct server_s server_t;
 
-server_t* init_server(int ipv4[4], int port);
+server_t* init_server(const char *name, int ipv4[4], int port);
 int start_server_async(pthread_t *thread, server_t *serv);
 int start_server(server_t *serv);
 void stop_server(server_t *serv);
@@ -60,7 +67,7 @@ void free_server(server_t *serv);
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
-#include <stdbool.h>
+#include <stdarg.h>
 
 #define BUF_SIZE 1000
 #define OVER_BUF 4
@@ -74,8 +81,43 @@ struct connection_args_s {
 typedef struct connection_args_s connection_args_t;
 
 enum method_e get_method(char *buffer) {
-  // TODO
-  return M_GET;
+  // strlen is compute at compile time
+#define TEST_METHOD(name)                           \
+  if (strncmp(buffer, #name, strlen(#name)) == 0) { \
+    return M_##name;                                \
+  }
+  TEST_METHOD(OPTIONS);
+  TEST_METHOD(GET);
+  TEST_METHOD(HEAD);
+  TEST_METHOD(POST);
+  TEST_METHOD(PUT);
+  TEST_METHOD(DELETE);
+  TEST_METHOD(TRACE);
+  TEST_METHOD(CONNECT);
+#undef TEST_METHOD
+  return M_UNDEFINED;
+}
+
+void server_log_error(server_t *serv, char *fmt, ...) {
+  if (serv->log & SERVER_LOG_ERROR) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "Server %s : ", serv->name);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+  }
+}
+
+void server_log_info(server_t *serv, char *fmt, ...) {
+  if (serv->log & SERVER_LOG_INFO) {
+    va_list ap;
+    va_start(ap, fmt);
+    printf("Server %s : ", serv->name);
+    vprintf(fmt, ap);
+    printf("\n");
+    va_end(ap);
+  }
 }
 
 void* connection(void *args) {
@@ -119,7 +161,7 @@ void* connection(void *args) {
     size_t uriPartSize = uriEnd - uriStart;
     size_t uriSize = alreadyPaste + uriPartSize;
     if (uriSize > URL_SIZE) {
-      fprintf(stderr, "Uri trop longue\n");
+      server_log_error(serv, "Uri trop longue");
       goto end;
     }
     *uriEnd = 0;
@@ -131,7 +173,7 @@ void* connection(void *args) {
     size_t uriSize = alreadyPaste + uriPartSize;
     char *uriEnd = uriStart + uriPartSize;
     if (uriSize > URL_SIZE) {
-      fprintf(stderr, "Uri trop longue\n");
+      server_log_error(serv, "Uri trop longue");
       goto end;
     }
     *uriEnd = 0;
@@ -142,7 +184,7 @@ void* connection(void *args) {
     goto copyuri;
   }
 
-  printf("URI : \"%s\"\n", uri);
+  server_log_info(serv, "URI : \"%s\"", uri);
 
   // TODO read header
   while (!strstr(full_buffer, "\r\n\r\n") && !strstr(full_buffer, "\n\n")) {
@@ -160,14 +202,14 @@ void* connection(void *args) {
   if (serv->request != NULL) {
     serv->request(connection_fd, &req);
   } else {
-    fprintf(stderr, "No request function for %s on port %d\n", inet_ntoa((struct in_addr){serv->ip}), serv->port);
+    server_log_error(serv, "No request function for %s on port %d", inet_ntoa((struct in_addr){serv->ip}), serv->port);
   }
 
  end:
   pthread_mutex_lock(&(serv->fds_mutex));
   serv->connections_fd[param->index] = -1;
   pthread_mutex_unlock(&(serv->fds_mutex));
-  if (serv->log) printf("END connection %d (fd: %d, index: %d)\n", param->number, connection_fd, param->index);
+  server_log_info(serv, "END connection %d (fd: %d, index: %d)", param->number, connection_fd, param->index);
   close(connection_fd);
   free(args);
   pthread_exit(NULL);
@@ -181,10 +223,12 @@ int ip_to_int(int ipbytes[4]) {
   return a+b+c+d;
 }
 
-server_t* init_server(int ipv4[4], int port) {
+server_t* init_server(const char *name, int ipv4[4], int port) {
   server_t *serv = (server_t *)malloc(sizeof(server_t));
+  serv->name = name;
   serv->ip = ip_to_int(ipv4);
   serv->port = port;
+  serv->thread = NULL;
   serv->keep_running = 0;
   serv->nb_connection = 4;
   serv->listen_fd = -1;
@@ -193,7 +237,7 @@ server_t* init_server(int ipv4[4], int port) {
     serv->connections_fd[i] = -1;
   }
   pthread_mutex_init(&(serv->fds_mutex), NULL);
-  serv->log = false;
+  serv->log = 0;
   serv->request = NULL;
   return serv;
 }
@@ -204,9 +248,10 @@ void* start_server_async_wrap(void *serv) {
 }
 
 int start_server_async(pthread_t *thread, server_t *serv) {
+  serv->thread = thread;
   int err = pthread_create(thread, NULL, start_server_async_wrap, (void*)serv);
   if (err) {
-    fprintf(stderr, "pthread_create failed : %d\n", err);
+    server_log_error(serv, "pthread_create failed : %d", err);
     return 1;
   }
   return 0;
@@ -217,12 +262,12 @@ int start_server(server_t *serv) {
 
   serv->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (serv->listen_fd == -1) {
-    fprintf(stderr, "socket failed : %d\n", errno);
+    server_log_error(serv, "socket failed : %d", errno);
     return 1;
   }
 
   if (setsockopt(serv->listen_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
-    fprintf(stderr, "setsockopt(SO_REUSEADDR) failed\n");
+    server_log_info(serv, "setsockopt(SO_REUSEADDR) failed");
     return 1;
   }
 
@@ -231,14 +276,15 @@ int start_server(server_t *serv) {
   addr.sin_family = AF_INET;
   addr.sin_port = htons(serv->port);
   addr.sin_addr.s_addr = serv->ip;
-  if (serv->log) printf("IP address: %s\nPort : %d\n",inet_ntoa(addr.sin_addr), serv->port);
+  server_log_info(serv, "IP address: %s", inet_ntoa(addr.sin_addr));
+  server_log_info(serv, "Port : %d", serv->port);
   if (bind(serv->listen_fd, (struct sockaddr*) &addr, sizeof(addr)) == -1) {
-    fprintf(stderr, "bind failed : %d\n", errno);
+    server_log_error(serv, "bind failed : %d", errno);
     close(serv->listen_fd);
     return 1;
   }
   if (listen(serv->listen_fd, serv->nb_connection) == -1) {
-    fprintf(stderr, "listen failed : %d\n", errno);
+    server_log_error(serv, "listen failed : %d", errno);
     close(serv->listen_fd);
     return 1;
   }
@@ -251,8 +297,11 @@ int start_server(server_t *serv) {
     socklen_t connection_addr_size;
     connection_addr_size = sizeof(connection_addr);
     int connection_fd = accept(serv->listen_fd, (struct sockaddr *) &connection_addr, &connection_addr_size);
-    if (connection_fd  == -1) {
-      fprintf(stderr, "accept failed : %d\n", errno);
+    if (!serv->keep_running) {
+      break;
+    }
+    if (connection_fd == -1) {
+      server_log_error(serv, "accept failed : %d", errno);
       close(serv->listen_fd);
       return 1;
     }
@@ -266,7 +315,7 @@ int start_server(server_t *serv) {
     }
     pthread_mutex_unlock(&(serv->fds_mutex));
     if (index < 0) {
-      fprintf(stderr, "invalid index (no connection)\n");
+      server_log_error(serv, "invalid index (no connection)");
       close(connection_fd);
       continue;
     }
@@ -284,24 +333,30 @@ int start_server(server_t *serv) {
       pthread_mutex_lock(&(serv->fds_mutex));
       serv->connections_fd[index] = -1;
       pthread_mutex_unlock(&(serv->fds_mutex));
-      fprintf(stderr, "pthread_create failed : %d\n", err);
+      server_log_error(serv, "pthread_create failed : %d", err);
       close(connection_fd);
       continue;
     }
-    if (serv->log) printf("START connection %d (fd: %d, index: %d)\n", args->number, connection_fd, args->index);
+    server_log_info(serv, "START connection %d (fd: %d, index: %d)", args->number, connection_fd, args->index);
   }
 
   close(serv->listen_fd);
+  server_log_info(serv, "CLOSE");
   return 0;
 }
 
 void stop_server(server_t *serv) {
+  if (serv->thread) {
+    server_log_info(serv, "pthread_cancel");
+    pthread_cancel(*serv->thread);
+  }
   serv->keep_running = 0;
   close(serv->listen_fd);
+  serv->listen_fd = -1;
   pthread_mutex_lock(&(serv->fds_mutex));
   for (int i=0; i<serv->nb_connection; i++) {
     if (serv->connections_fd[i] >= 0) {
-      if (serv->log) printf("close %d\n", i);
+      server_log_info(serv, "close %d", i);
       close(serv->connections_fd[i]);
     }
   }
