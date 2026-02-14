@@ -120,6 +120,20 @@ void server_log_info(server_t *serv, char *fmt, ...) {
   }
 }
 
+char *method_to_string(enum method_e method) {
+  switch (method) {
+  case M_OPTIONS : return "OPTIONS";
+  case M_GET     : return "GET";
+  case M_HEAD    : return "HEAD";
+  case M_POST    : return "POST";
+  case M_PUT     : return "PUT";
+  case M_DELETE  : return "DELETE";
+  case M_TRACE   : return "TRACE";
+  case M_CONNECT : return "CONNECT";
+  default        : return "UNDEFINED";
+  }
+}
+
 void* connection(void *args) {
   connection_args_t *param = (connection_args_t*) args;
   server_t *serv = param->serv;
@@ -153,6 +167,8 @@ void* connection(void *args) {
   case M_POST: uriStart = buffer + 5; break;
   default: goto end;
   }
+
+  server_log_info(serv, "Method : %s", method_to_string(method));
 
   size_t alreadyPaste = 0;
  copyuri:
