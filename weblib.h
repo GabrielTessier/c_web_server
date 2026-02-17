@@ -113,8 +113,8 @@ void free_server(server_t *serv);
 #include <pthread.h>
 #include <stdarg.h>
 
-//#define BUF_SIZE 1000
-#define BUF_SIZE 5
+#define BUF_SIZE 1000
+//#define BUF_SIZE 3
 //#define OVER_BUF 4
 #define OVER_BUF 3
 #define URL_SIZE 2000
@@ -189,11 +189,13 @@ char *method_to_string(enum method_e method) {
     buffer[read_size] = 0;                                      \
   } while (0)
 
-char *read_util_nl(int fd, char (*full_buffer_p)[8], char **buffer_p, size_t *read_size_p, size_t start_at) {
+char *read_until_nl(int fd, char (*full_buffer_p)[BUF_SIZE + OVER_BUF + 1], char **buffer_p, size_t *read_size_p, size_t start_at, char **end_buffer) {
   char *full_buffer = *full_buffer_p;
   char *buffer = *buffer_p;
   char *start = buffer + start_at;
   size_t read_size = *read_size_p;
+
+  size_t nb_copy_last;
 
   char *line = NULL;
 
@@ -203,7 +205,8 @@ char *read_util_nl(int fd, char (*full_buffer_p)[8], char **buffer_p, size_t *re
     line = (char*) malloc(sizeof(char) * length);
     strncpy(line, start, length-1);
     line[length-1] = 0;
-    return line;
+    nb_copy_last = new_line - buffer;
+    goto end;
   }
 
   size_t length = strlen(start) + 1;
@@ -212,8 +215,7 @@ char *read_util_nl(int fd, char (*full_buffer_p)[8], char **buffer_p, size_t *re
   line[length-1] = 0;
 
   read_data(full_buffer, buffer, fd, read_size);
-  char *nl = NULL;
-  while (!(nl = strstr(full_buffer, "\r\n"))) {
+  while (!(new_line = strstr(full_buffer, "\r\n"))) {
     size_t newlength = length + read_size;
     line = realloc(line, newlength);
     strncpy(line + length - 1, buffer, read_size);
@@ -222,12 +224,24 @@ char *read_util_nl(int fd, char (*full_buffer_p)[8], char **buffer_p, size_t *re
     read_data(full_buffer, buffer, fd, read_size);
   }
 
-  size_t newlength = length + nl - buffer;
+  nb_copy_last = new_line - buffer;
+  size_t newlength = length + nb_copy_last;
   line = (char*) realloc(line, newlength);
-  strncpy(line + length - 1, buffer, read_size);
+  if (nb_copy_last > 0) {
+    strncpy(line + length - 1, buffer, nb_copy_last);
+  }
   line[newlength-1] = 0;
 
+ end:
   *read_size_p = read_size;
+  if (nb_copy_last + 2 < read_size) {
+    *end_buffer = buffer + nb_copy_last + 2;
+  } else {
+    size_t add = (nb_copy_last + 2) - read_size;
+    read_data(full_buffer, buffer, fd, read_size);
+    *end_buffer = buffer + add;
+    //*end_buffer = buffer;
+  }
 
   return line;
 }
@@ -237,15 +251,14 @@ void* connection(void *args) {
   server_t *serv = param->serv;
   int connection_fd = serv->connections_fd[param->index];
 
-  char full_buffer[BUF_SIZE + OVER_BUF];
+  char full_buffer[BUF_SIZE + OVER_BUF + 1];
   //for (int i=0; i<OVER_BUF; i++) {
   //  full_buffer[i] = 'a';
   //}
-  memset(full_buffer, 'a', BUF_SIZE+OVER_BUF);
+  memset(full_buffer, 'a', BUF_SIZE+OVER_BUF+1);
   char *buffer = full_buffer+OVER_BUF;
   char uri[URL_SIZE];
   //int methodOff = 0;
-  char *headerStart = NULL;
 
   size_t read_size = 0;
 
@@ -315,31 +328,40 @@ void* connection(void *args) {
   //read http version, uriEnd : "SP HTTP-Version CRLF ..."
   uriEnd++;
 
-  char *http_version = read_util_nl(connection_fd, &full_buffer, &buffer, &read_size, uriEnd - buffer);
+  char *headerStart = NULL;
+
+  char *http_version = read_until_nl(connection_fd, &full_buffer, &buffer, &read_size, uriEnd - buffer, &headerStart);
 
   server_log_info(serv, "HTTP version : \"%s\"", http_version);
 
-  headerStart = strstr(full_buffer, "\r\n")+2;
-
-  char headerName[MAX_HEADER_SIZE];
-  size_t posInHeaderName = 0;
-  char *sep = NULL;
-  size_t headerReadSize = strlen(headerStart);
-  while (!(sep = strchr(headerStart, ':'))) {
-    strncpy(headerName + posInHeaderName, headerStart, headerReadSize);
-    posInHeaderName += headerReadSize;
-    read_data(full_buffer, buffer, connection_fd, read_size);
-    headerStart = buffer;
-    headerReadSize = read_size;
+  while (strncmp(headerStart, "\r\n", 2) != 0) {
+    char headerName[MAX_HEADER_SIZE];
+    size_t posInHeaderName = 0;
+    char *sep = NULL;
+    size_t headerReadSize = strlen(headerStart);
+    while (!(sep = strchr(headerStart, ':'))) {
+      strncpy(headerName + posInHeaderName, headerStart, headerReadSize);
+      posInHeaderName += headerReadSize;
+      read_data(full_buffer, buffer, connection_fd, read_size);
+      headerStart = buffer;
+      headerReadSize = read_size;
+    }
+    strncpy(headerName + posInHeaderName, headerStart, sep - headerStart);
+    posInHeaderName += sep - headerStart;
+    headerName[posInHeaderName] = 0;
+    if (sep+2 >= buffer + read_size) {
+      size_t add = (sep+2) - (buffer + read_size);
+      read_data(full_buffer, buffer, connection_fd, read_size);
+      sep = buffer+add-2;
+    }
+    char *headerValue = read_until_nl(connection_fd, &full_buffer, &buffer, &read_size, sep+2 - buffer, &headerStart);
+    printf("header : \"%s\" : \"%s\"\n", headerName, headerValue);
+    if (read_size - (headerStart - buffer) < 2) {
+      size_t end_size = read_size - (headerStart - buffer);
+      read_data(full_buffer, buffer, connection_fd, read_size);
+      headerStart = buffer - end_size;
+    }
   }
-  strncpy(headerName + posInHeaderName, headerStart, sep - headerStart);
-  posInHeaderName += sep - headerStart;
-  headerName[posInHeaderName] = 0;
-  printf("header : \"%s\"\n", headerName);
-
-
-  char *headerValue = NULL;
-
 
   // TODO read header
 
