@@ -180,6 +180,58 @@ char *method_to_string(enum method_e method) {
   }
 }
 
+#define read_data(full_buffer, buffer, fd, read_size)           \
+  do {                                                          \
+    for (int i=0; i<OVER_BUF; i++) {                            \
+      full_buffer[i] = buffer[read_size-OVER_BUF+i];            \
+    }                                                           \
+    read_size = read(fd, buffer, BUF_SIZE);                     \
+    buffer[read_size] = 0;                                      \
+  } while (0)
+
+char *read_util_nl(int fd, char (*full_buffer_p)[8], char **buffer_p, size_t *read_size_p, size_t start_at) {
+  char *full_buffer = *full_buffer_p;
+  char *buffer = *buffer_p;
+  char *start = buffer + start_at;
+  size_t read_size = *read_size_p;
+
+  char *line = NULL;
+
+  char *new_line = strstr(start, "\r\n");
+  if (new_line) {
+    size_t length = new_line - start + 1;
+    line = (char*) malloc(sizeof(char) * length);
+    strncpy(line, start, length-1);
+    line[length-1] = 0;
+    return line;
+  }
+
+  size_t length = strlen(start) + 1;
+  line = (char*) malloc(sizeof(char) * length);
+  strncpy(line, start, length-1);
+  line[length-1] = 0;
+
+  read_data(full_buffer, buffer, fd, read_size);
+  char *nl = NULL;
+  while (!(nl = strstr(full_buffer, "\r\n"))) {
+    size_t newlength = length + read_size;
+    line = realloc(line, newlength);
+    strncpy(line + length - 1, buffer, read_size);
+    line[newlength-1] = 0;
+    length = newlength;
+    read_data(full_buffer, buffer, fd, read_size);
+  }
+
+  size_t newlength = length + nl - buffer;
+  line = (char*) realloc(line, newlength);
+  strncpy(line + length - 1, buffer, read_size);
+  line[newlength-1] = 0;
+
+  *read_size_p = read_size;
+
+  return line;
+}
+
 void* connection(void *args) {
   connection_args_t *param = (connection_args_t*) args;
   server_t *serv = param->serv;
@@ -197,16 +249,6 @@ void* connection(void *args) {
 
   size_t read_size = 0;
 
-#define read_data()                                             \
-  do {                                                          \
-    for (int i=0; i<OVER_BUF; i++) {                            \
-      full_buffer[i] = buffer[read_size-OVER_BUF+i];            \
-    }                                                           \
-    read_size = read(connection_fd, buffer, BUF_SIZE);          \
-    buffer[read_size] = 0;                                      \
-  } while (0);
-
-
   /* https://datatracker.ietf.org/doc/html/rfc2616#section-5
    * Request = Request-Line              ; Section 5.1
    *           *(( general-header        ; Section 4.5
@@ -217,7 +259,7 @@ void* connection(void *args) {
    *
    * Request-Line = Method SP Request-URI SP HTTP-Version CRLF
    */
-  read_data();
+  read_data(full_buffer, buffer, connection_fd, read_size);
   enum method_e method = get_method(buffer);
   char *uriStart;
   switch (method) {
@@ -231,10 +273,10 @@ void* connection(void *args) {
   if (uriStart > buffer + BUF_SIZE) {
     size_t over = uriStart - (buffer + BUF_SIZE);
     while (over > BUF_SIZE) {
-      read_data();
+      read_data(full_buffer, buffer, connection_fd, read_size);
       over -= BUF_SIZE;
     }
-    read_data();
+    read_data(full_buffer, buffer, connection_fd, read_size);
     uriStart = buffer + over;
   }
 
@@ -263,7 +305,7 @@ void* connection(void *args) {
     *uriEnd = 0;
     strcpy(uri + alreadyPaste, uriStart);
     alreadyPaste = uriSize;
-    read_data();
+    read_data(full_buffer, buffer, connection_fd, read_size);
     uriStart = buffer;
     goto copyuri;
   }
@@ -272,50 +314,37 @@ void* connection(void *args) {
 
   //read http version, uriEnd : "SP HTTP-Version CRLF ..."
   uriEnd++;
-  char *new_line = strstr(uriEnd, "\r\n");
-  char *http_version;
-  if (new_line) {
-    size_t length = new_line - uriEnd + 1;
-    http_version = (char*) malloc(sizeof(char) * length);
-    strncpy(http_version, uriEnd, length-1);
-    http_version[length-1] = 0;
-  } else {
-    size_t length = read_size - (uriEnd - buffer) + 1;
-    http_version = (char*) malloc(sizeof(char) * length);
-    strncpy(http_version, uriEnd, length-1);
-    http_version[length-1] = 0;
-    while (1) {
-      read_data();
-      char *new_line = strstr(full_buffer, "\r\n");
-      if (new_line) {
-        size_t added_length = new_line - buffer;
-        size_t newlength = length + added_length;
-        if (added_length <= 0) {
-          http_version[newlength-1] = 0;
-        } else {
-          http_version = realloc(http_version, newlength);
-          strncpy(http_version + length - 1, buffer, added_length);
-          http_version[newlength-1] = 0;
-        }
-        headerStart = buffer + added_length + 2; // +2 for \r\n
-        length = newlength;
-        break;
-      } else {
-        size_t newlength = length + read_size;
-        http_version = realloc(http_version, newlength);
-        strncpy(http_version + length - 1, buffer, read_size);
-        http_version[newlength-1] = 0;
-        length = newlength;
-      }
-    }
-  }
+
+  char *http_version = read_util_nl(connection_fd, &full_buffer, &buffer, &read_size, uriEnd - buffer);
 
   server_log_info(serv, "HTTP version : \"%s\"", http_version);
+
+  headerStart = strstr(full_buffer, "\r\n")+2;
+
+  char headerName[MAX_HEADER_SIZE];
+  size_t posInHeaderName = 0;
+  char *sep = NULL;
+  size_t headerReadSize = strlen(headerStart);
+  while (!(sep = strchr(headerStart, ':'))) {
+    strncpy(headerName + posInHeaderName, headerStart, headerReadSize);
+    posInHeaderName += headerReadSize;
+    read_data(full_buffer, buffer, connection_fd, read_size);
+    headerStart = buffer;
+    headerReadSize = read_size;
+  }
+  strncpy(headerName + posInHeaderName, headerStart, sep - headerStart);
+  posInHeaderName += sep - headerStart;
+  headerName[posInHeaderName] = 0;
+  printf("header : \"%s\"\n", headerName);
+
+
+  char *headerValue = NULL;
+
 
   // TODO read header
 
   while (!strstr(full_buffer, "\r\n\r\n") && !strstr(full_buffer, "\n\n")) {
-    read_data();
+    read_data(full_buffer, buffer, connection_fd, read_size);
   }
 
   request_t req = {
