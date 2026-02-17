@@ -5,58 +5,68 @@
 
 enum server_log_e {
   SERVER_LOG_INFO = 1<<0,
-  SERVER_LOG_ERROR = 1<<1
+  SERVER_LOG_WARNING = 1<<1,
+  SERVER_LOG_ERROR = 1<<2
 };
 
 enum method_e {M_UNDEFINED = 0,
                M_OPTIONS, M_GET, M_HEAD, M_POST, M_PUT, M_DELETE, M_TRACE, M_CONNECT};
 
+// general header
+#define GENERAL_HEADER_LIST                     \
+  X(CACHE_CONTROL)                              \
+  X(CONNECTION)                                 \
+  X(DATE)                                       \
+  X(PRAGMA)                                     \
+  X(TRAILER)                                    \
+  X(TRANSFER_ENCODING)                          \
+  X(UPGRADE)                                    \
+  X(VIA)                                        \
+  X(WARNING)
+
+// request header
+#define REQUEST_HEADER_LIST                     \
+  X(ACCEPT)                                     \
+  X(ACCEPT_CHARSET)                             \
+  X(ACCEPT_ENCODING)                            \
+  X(ACCEPT_LANGUAGE)                            \
+  X(AUTHORIZATION)                              \
+  X(EXPECT)                                     \
+  X(FROM)                                       \
+  X(HOST)                                       \
+  X(IF_MATCH)                                   \
+  X(IF_MODIFIED_SINCE)                          \
+  X(IF_NONE_MATCH)                              \
+  X(IF_RANGE)                                   \
+  X(IF_UNMODIFIED_SINCE)                        \
+  X(MAX_FORWARDS)                               \
+  X(PROXY_AUTHORIZATION)                        \
+  X(RANGE)                                      \
+  X(REFERER)                                    \
+  X(TE)                                         \
+  X(USER_AGENT)
+
+// entity header
+#define ENTITY_HEADER_LIST                      \
+  X(ALLOW)                                      \
+  X(CONTENT_ENCODING)                           \
+  X(CONTENT_LANGUAGE)                           \
+  X(CONTENT_LENGTH)                             \
+  X(CONTENT_LOCATION)                           \
+  X(CONTENT_MD5)                                \
+  X(CONTENT_RANGE)                              \
+  X(CONTENT_TYPE)                               \
+  X(EXPIRES)                                    \
+  X(LAST_MODIFIED)                              \
+  X(EXTENSION_HEADER)
+
+
 enum header_e {
-  // general header
-  HEADER_CACHE_CONTROL = 0,
-  HEADER_CONNECTION,
-  HEADER_DATE,
-  HEADER_PRAGMA,
-  HEADER_TRAILER,
-  HEADER_TRANSFER_ENCODING,
-  HEADER_UPGRADE,
-  HEADER_VIA,
-  HEADER_WARNING,
-
-  // request header
-  HEADER_ACCEPT,
-  HEADER_ACCEPT_CHARSET,
-  HEADER_ACCEPT_ENCODING,
-  HEADER_ACCEPT_LANGUAGE,
-  HEADER_AUTHORIZATION,
-  HEADER_EXPECT,
-  HEADER_FROM,
-  HEADER_HOST,
-  HEADER_IF_MATCH,
-  HEADER_IF_MODIFIED_SINCE,
-  HEADER_IF_NONE_MATCH,
-  HEADER_IF_RANGE,
-  HEADER_IF_UNMODIFIED_SINCE,
-  HEADER_MAX_FORWARDS,
-  HEADER_PROXY_AUTHORIZATION,
-  HEADER_RANGE,
-  HEADER_REFERER,
-  HEADER_TE,
-  HEADER_USER_AGENT,
-
-  // entity header
-  HEADER_ALLOW,
-  HEADER_CONTENT_ENCODING,
-  HEADER_CONTENT_LANGUAGE,
-  HEADER_CONTENT_LENGTH,
-  HEADER_CONTENT_LOCATION,
-  HEADER_CONTENT_MD5,
-  HEADER_CONTENT_RANGE,
-  HEADER_CONTENT_TYPE,
-  HEADER_EXPIRES,
-  HEADER_LAST_MODIFIED,
-  HEADER_EXTENSION_HEADER,
-
+#define X(name) HEADER_##name,
+  GENERAL_HEADER_LIST
+  REQUEST_HEADER_LIST
+  ENTITY_HEADER_LIST
+#undef X
   MAX_HEADER
 };
 
@@ -91,6 +101,9 @@ struct server_s {
   void (*request)(int fd, request_t *req);
 };
 typedef struct server_s server_t;
+
+enum header_e header_to_int(char *header_name);
+char *header_to_string(enum header_e header);
 
 server_t* init_server(char *name, int ipv4[4], int port);
 int start_server_async(pthread_t *thread, server_t *serv);
@@ -148,9 +161,20 @@ void server_log_error(server_t *serv, char *fmt, ...) {
   if (serv->log & SERVER_LOG_ERROR) {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "Server %s : ", serv->name);
+    fprintf(stderr, "\033[0;31mServer error %s : ", serv->name);
     vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
+    fprintf(stderr, "\033[0m\n");
+    va_end(ap);
+  }
+}
+
+void server_log_warning(server_t *serv, char *fmt, ...) {
+  if (serv->log & SERVER_LOG_WARNING) {
+    va_list ap;
+    va_start(ap, fmt);
+    printf("\033[0;33mServer warning %s : ", serv->name);
+    vprintf(fmt, ap);
+    printf("\033[0m\n");
     va_end(ap);
   }
 }
@@ -159,7 +183,7 @@ void server_log_info(server_t *serv, char *fmt, ...) {
   if (serv->log & SERVER_LOG_INFO) {
     va_list ap;
     va_start(ap, fmt);
-    printf("Server %s : ", serv->name);
+    printf("Server info %s : ", serv->name);
     vprintf(fmt, ap);
     printf("\n");
     va_end(ap);
@@ -177,6 +201,33 @@ char *method_to_string(enum method_e method) {
   case M_TRACE   : return "TRACE";
   case M_CONNECT : return "CONNECT";
   default        : return "UNDEFINED";
+  }
+}
+
+enum header_e header_to_int(char *header_name) {
+  size_t size = strlen(header_name);
+  char *header_name_format = (char*) malloc(sizeof(char) * (size+1));
+  strncpy(header_name_format, header_name, size);
+  for (size_t i=0; i<size; i++) {
+    if (header_name_format[i] == '-') {
+      header_name_format[i] = '_';
+    }
+  }
+#define X(name) if (strcasecmp(header_name_format, #name) == 0) return HEADER_##name;
+  GENERAL_HEADER_LIST
+  REQUEST_HEADER_LIST
+  ENTITY_HEADER_LIST
+#undef X
+  return MAX_HEADER; // invalid header
+}
+
+char *header_to_string(enum header_e header) {
+#define X(name) case HEADER_##name: return #name;
+  switch (header) {
+    GENERAL_HEADER_LIST
+    REQUEST_HEADER_LIST
+    ENTITY_HEADER_LIST
+  default: return NULL;
   }
 }
 
@@ -334,6 +385,8 @@ void* connection(void *args) {
 
   server_log_info(serv, "HTTP version : \"%s\"", http_version);
 
+  char *headers_list[MAX_HEADER];
+
   while (strncmp(headerStart, "\r\n", 2) != 0) {
     char headerName[MAX_HEADER_SIZE];
     size_t posInHeaderName = 0;
@@ -355,11 +408,18 @@ void* connection(void *args) {
       sep = buffer+add-2;
     }
     char *headerValue = read_until_nl(connection_fd, &full_buffer, &buffer, &read_size, sep+2 - buffer, &headerStart);
-    printf("header : \"%s\" : \"%s\"\n", headerName, headerValue);
+    server_log_info(serv, "header : \"%s\" : \"%s\"", headerName, headerValue);
     if (read_size - (headerStart - buffer) < 2) {
       size_t end_size = read_size - (headerStart - buffer);
       read_data(full_buffer, buffer, connection_fd, read_size);
       headerStart = buffer - end_size;
+    }
+
+    enum header_e header_int = header_to_int(headerName);
+    if (header_int == MAX_HEADER) {
+      server_log_warning(serv, "Invalid header : \"%s\"", headerName);
+    } else {
+      headers_list[header_int] = headerValue;
     }
   }
 
@@ -373,8 +433,11 @@ void* connection(void *args) {
     .method = M_GET,
     .uri = uri,
     .http_version = http_version,
-    .headers = {0}    // TODO
+    //.headers = headers_list
   };
+  for (int i=0; i<MAX_HEADER; i++) {
+    req.headers[i] = headers_list[i];
+  }
   if (serv->request != NULL) {
     serv->request(connection_fd, &req);
   } else {

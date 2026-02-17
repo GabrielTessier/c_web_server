@@ -127,6 +127,12 @@ void get(int fd, request_t *request) {
 }
 
 void req(int fd, request_t *request) {
+  printf("Request header : \n");
+  for (int i=0; i<MAX_HEADER; i++) {
+    if (request->headers[i]) {
+      printf("\t%s : %s\n", header_to_string(i), request->headers[i]);
+    }
+  }
   switch (request->method) {
   case M_GET: get(fd, request); break;
   default: break;
@@ -142,9 +148,9 @@ int main(void) {
   signal(SIGINT, intHandler);
   http = init_server("http", (int[4]){127, 0, 1, 1}, 6767);
   http->request = req;
-  http->log = SERVER_LOG_INFO | SERVER_LOG_ERROR;
+  http->log = SERVER_LOG_INFO | SERVER_LOG_WARNING | SERVER_LOG_ERROR;
   websocket = init_server("websocket", (int[4]){127, 0, 1, 1}, 1234); // ws
-  websocket->log = SERVER_LOG_INFO | SERVER_LOG_ERROR;
+  websocket->log = SERVER_LOG_INFO | SERVER_LOG_WARNING | SERVER_LOG_ERROR;
 
   pthread_t thread;
   start_server_async(&thread, http);
