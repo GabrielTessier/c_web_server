@@ -6,22 +6,59 @@
     <title>Test</title>
   </head>
   <body>
+    <div id="commands">
+      <form>
+	<ul>
+	  <li><input id="newItem" name="newItem" type="text">
+            <input name="push" type="button" value="push"></li>
+	</ul>
+      </form>
+    </div>
 
-    <p>AAAA</p>
+    <div id="contents">
+      <h1>Messages</h1>
+      <ul id="lifo">
+      </ul>
+    </div>
 
     <script>
-     const base_url = window.location.origin;
+     // Create WebSocket connection.
+     const socket = new WebSocket("ws://localhost:8002");
 
-     const ws = new WebSocket("ws://"+ window.location.hostname + ":1234");
-
-     function valider() {
-       ws.send("validate");
+     function push(text) {
+       const ul = document.getElementById("lifo");
+       const li = document.createElement("li");
+       li.appendChild(document.createTextNode(text));
+       ul.appendChild(li);
      }
 
-     ws.onmessage = (event) => {
-       console.log(event);
-       //if (event.data === "validate")
-     };
+     function send() {
+       const text = document.getElementById("newItem");
+       if (text.value != "") {
+         socket.send(text.value);
+         text.value = "";
+       }
+     }
+
+     function key_send(event) {
+       if (event.keyCode == 13) {
+         event.preventDefault();
+         send();
+       }
+     }
+
+     window.addEventListener("load", () => {
+       const newItem = document.getElementById("newItem");
+       newItem.addEventListener("keypress", key_send, false);
+
+       const push = document.querySelector("#commands [name='push']");
+       push.addEventListener("click", send);
+     });
+
+     // Listen for messages
+     socket.addEventListener("message", (event) => {
+       push(event.data);
+     });
     </script>
   </body>
 </html>

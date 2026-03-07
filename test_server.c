@@ -20,6 +20,9 @@
 server_t *http;
 server_t *websocket;
 
+// first elem -> size
+int *websocket_fds;
+
 // define in string_lib.c
 char *str_replace(char *orig, char *rep, char *with);
 
@@ -33,9 +36,8 @@ void send_file(int fd, char *file_path, struct stat *sb) {
   if (file_stream) {
     size_t file_path_size = strlen(file_path);
     char *header;
-    printf("FF : \"%s\", \"%s\"\n", file_path, file_path + file_path_size - 4);
+    printf("send file : \"%s\", \"%s\"\n", file_path, file_path + file_path_size - 4);
     if (strncmp(file_path + file_path_size - 4, "html", 4) == 0) {
-      printf("HTML\n");
       header = "HTTP/1.0 200 OK\nContent-Type: text/html\n";
     } else if (strncmp(file_path + file_path_size - 3, "css", 3) == 0) {
       header = "HTTP/1.0 200 OK\nContent-Type: text/css\n";
@@ -72,6 +74,7 @@ void send_file(int fd, char *file_path, struct stat *sb) {
 }
 
 void send_dir(int fd, char *uri, char *dir_path, struct stat *sb) {
+  (void) sb;
   DIR *dirp = opendir(dir_path);
   if (!dirp) {
     send_404(fd);
@@ -105,7 +108,9 @@ void send_dir(int fd, char *uri, char *dir_path, struct stat *sb) {
 
 void get(int fd, request_t *request) {
   char file_path[PATH_MAX+1];
-  getcwd(file_path, PATH_MAX);
+  if (getcwd(file_path, PATH_MAX) == NULL) {
+    strcpy(file_path, "/");
+  }
   strncat(file_path, request->uri, PATH_MAX - strlen(file_path));
 
   char *file = str_replace(file_path, "%20", " ");
@@ -127,30 +132,67 @@ void get(int fd, request_t *request) {
 }
 
 void req(int fd, request_t *request) {
-  printf("Request header : \n");
-  for (int i=0; i<MAX_HEADER; i++) {
-    if (request->headers[i]) {
-      printf("\t%s : %s\n", header_to_string(i), request->headers[i]);
-    }
-  }
+  /* printf("Request header : \n"); */
+  /* for (int i=0; i<MAX_HEADER; i++) { */
+  /*   if (request->headers[i]) { */
+  /*     printf("\t%s : %s\n", header_to_string(i), request->headers[i]); */
+  /*   } */
+  /* } */
   switch (request->method) {
   case M_GET: get(fd, request); break;
   default: break;
   }
 }
 
+void websock_callback(int fd, char *content, int opcode) {
+  if (opcode == 8) {
+    // close
+    for (int i = 0; i < websocket_fds[0]; i++) {
+      if (websocket_fds[i+1] == fd) {
+        websocket_fds[i + 1] = websocket_fds[websocket_fds[0]];
+        websocket_fds[0]--;
+        websocket_fds =
+            (int *)realloc(websocket_fds, sizeof(int) * (websocket_fds[0] + 1));
+        break;
+      }
+    }
+    return;
+  }
+  printf("Content : %s\n", content);
+  if (strncmp(content, "toto", 4) == 0) {
+    char *rep = "la réponse à toto";
+    websocket_send(fd, rep, strlen(rep));
+  }
+  size_t content_size = strlen(content);
+  for (int i=0; i<websocket_fds[0]; i++) {
+    websocket_send(websocket_fds[i+1], content, content_size);
+  }
+}
+
+void websock(int fd, request_t *request) {
+  websocket_fds[0]++;
+  websocket_fds = (int*) realloc(websocket_fds, sizeof(int) * (websocket_fds[0]+1));
+  websocket_fds[websocket_fds[0]] = fd;
+  websocket_init(fd, request, websock_callback);
+}
+
 void intHandler(int dummy) {
+  (void) dummy;
   stop_server(http);
   stop_server(websocket);
 }
 
 int main(void) {
   signal(SIGINT, intHandler);
-  http = init_server("http", (int[4]){127, 0, 1, 1}, 6767);
+  http = init_server("http", (int[4]){127, 0, 0, 1}, 8001);
   http->request = req;
-  http->log = SERVER_LOG_INFO | SERVER_LOG_WARNING | SERVER_LOG_ERROR;
-  websocket = init_server("websocket", (int[4]){127, 0, 1, 1}, 1234); // ws
-  websocket->log = SERVER_LOG_INFO | SERVER_LOG_WARNING | SERVER_LOG_ERROR;
+  //http->log = SERVER_LOG_INFO | SERVER_LOG_WARNING | SERVER_LOG_ERROR;
+  websocket = init_server("websocket", (int[4]){127, 0, 0, 1}, 8002); // ws
+  websocket->request = websock;
+  //websocket->log = SERVER_LOG_INFO | SERVER_LOG_WARNING | SERVER_LOG_ERROR;
+
+  websocket_fds = (int*) malloc(sizeof(int));
+  websocket_fds[0] = 0;
 
   pthread_t thread;
   start_server_async(&thread, http);

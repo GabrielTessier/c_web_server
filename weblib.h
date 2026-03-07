@@ -84,6 +84,8 @@ struct request_s {
   char *uri;
   char *http_version;
   char *headers[MAX_HEADER];
+  int nb_extra_headers;
+  char *(*extra_headers)[2];
 };
 typedef struct request_s request_t;
 
@@ -111,6 +113,7 @@ int start_server(server_t *serv);
 void stop_server(server_t *serv);
 void free_server(server_t *serv);
 
+void websocket_init(int fd, request_t *request, void (*callback)(int fd, char *content, int opcode));
 
 #ifdef WEBLIB_IMPLEMENTATION
 
@@ -125,6 +128,25 @@ void free_server(server_t *serv);
 #include <signal.h>
 #include <pthread.h>
 #include <stdarg.h>
+
+// websocket
+#include "sha1.h"
+#define BASE64(n)                                                              \
+  do {                                                                         \
+    if (n < 26)                                                                \
+      n += 'A';                                                                \
+    else if (n < 52)                                                           \
+      n = (n - 26) + 'a';                                                      \
+    else if (n < 62)                                                           \
+      n = (n - 52) + '0';                                                      \
+    else if (n == 62)                                                          \
+      n = '+';                                                                 \
+    else if (n == 63)                                                          \
+      n = '/';                                                                 \
+    else                                                                       \
+      n = '=';                                                                 \
+  } while (0)
+
 
 #define BUF_SIZE 1000
 //#define BUF_SIZE 3
@@ -207,7 +229,8 @@ char *method_to_string(enum method_e method) {
 enum header_e header_to_int(char *header_name) {
   size_t size = strlen(header_name);
   char *header_name_format = (char*) malloc(sizeof(char) * (size+1));
-  strncpy(header_name_format, header_name, size);
+  strncpy(header_name_format, header_name, size + 1);
+  header_name_format[size] = 0;
   for (size_t i=0; i<size; i++) {
     if (header_name_format[i] == '-') {
       header_name_format[i] = '_';
@@ -311,6 +334,9 @@ void* connection(void *args) {
   char uri[URL_SIZE];
   //int methodOff = 0;
 
+  request_t req;
+  req.uri = uri;
+
   size_t read_size = 0;
 
   /* https://datatracker.ietf.org/doc/html/rfc2616#section-5
@@ -331,6 +357,8 @@ void* connection(void *args) {
   case M_POST: uriStart = buffer + 5; break;
   default: goto end;
   }
+
+  req.method = method;
 
   server_log_info(serv, "Method : %s", method_to_string(method));
 
@@ -381,26 +409,37 @@ void* connection(void *args) {
 
   char *headerStart = NULL;
 
-  char *http_version = read_until_nl(connection_fd, &full_buffer, &buffer, &read_size, uriEnd - buffer, &headerStart);
+  req.http_version = read_until_nl(connection_fd, &full_buffer, &buffer, &read_size, uriEnd - buffer, &headerStart);
 
-  server_log_info(serv, "HTTP version : \"%s\"", http_version);
+  server_log_info(serv, "HTTP version : \"%s\"", req.http_version);
 
-  char *headers_list[MAX_HEADER];
+  req.nb_extra_headers = 0;
 
   while (strncmp(headerStart, "\r\n", 2) != 0) {
-    char headerName[MAX_HEADER_SIZE];
+    // char headerName[MAX_HEADER_SIZE];
+    size_t headerNameSize = MAX_HEADER_SIZE;
+    char *headerName = (char*) malloc(headerNameSize+1);
     size_t posInHeaderName = 0;
     char *sep = NULL;
     size_t headerReadSize = strlen(headerStart);
     while (!(sep = strchr(headerStart, ':'))) {
+      if (posInHeaderName + headerReadSize >= headerNameSize) {
+        headerNameSize = posInHeaderName + headerReadSize;
+        headerName = (char*) realloc(headerName, headerNameSize+1);
+      }
       strncpy(headerName + posInHeaderName, headerStart, headerReadSize);
       posInHeaderName += headerReadSize;
       read_data(full_buffer, buffer, connection_fd, read_size);
       headerStart = buffer;
       headerReadSize = read_size;
     }
-    strncpy(headerName + posInHeaderName, headerStart, sep - headerStart);
-    posInHeaderName += sep - headerStart;
+    size_t size = sep - headerStart;
+    if (posInHeaderName + size >= headerNameSize) {
+      headerNameSize = posInHeaderName + size;
+      headerName = (char*) realloc(headerName, headerNameSize+1);
+    }
+    strncpy(headerName + posInHeaderName, headerStart, size);
+    posInHeaderName += size;
     headerName[posInHeaderName] = 0;
     if (sep+2 >= buffer + read_size) {
       size_t add = (sep+2) - (buffer + read_size);
@@ -418,33 +457,36 @@ void* connection(void *args) {
     enum header_e header_int = header_to_int(headerName);
     if (header_int == MAX_HEADER) {
       server_log_warning(serv, "Invalid header : \"%s\"", headerName);
+      req.nb_extra_headers++;
+      req.extra_headers = (char *(*)[2]) realloc(req.extra_headers, req.nb_extra_headers * 2 * sizeof(char*));
+      req.extra_headers[req.nb_extra_headers - 1][0] = headerName;
+      req.extra_headers[req.nb_extra_headers - 1][1] = headerValue;
     } else {
-      headers_list[header_int] = headerValue;
+      free(headerName);
+      req.headers[header_int] = headerValue;
     }
   }
 
   // TODO read header
 
+  int first = 1;
   while (!strstr(full_buffer, "\r\n\r\n") && !strstr(full_buffer, "\n\n")) {
+    if (first) {
+      first = 0;
+      server_log_warning(serv, "unread data :\n");
+      server_log_warning(serv, "first line : %s\n", buffer);
+    }
     read_data(full_buffer, buffer, connection_fd, read_size);
+    server_log_warning(serv, "%s\n", buffer);
   }
 
-  request_t req = {
-    .method = M_GET,
-    .uri = uri,
-    .http_version = http_version,
-    //.headers = headers_list
-  };
-  for (int i=0; i<MAX_HEADER; i++) {
-    req.headers[i] = headers_list[i];
-  }
   if (serv->request != NULL) {
     serv->request(connection_fd, &req);
   } else {
     server_log_error(serv, "No request function");
   }
 
-  free(http_version);
+  free(req.http_version);
 
  end:
   pthread_mutex_lock(&(serv->fds_mutex));
@@ -605,6 +647,162 @@ void stop_server(server_t *serv) {
 void free_server(server_t *serv) {
   free(serv->connections_fd);
   free(serv);
+}
+
+void websocket_send(int fd, char *msg, size_t size) {
+  if (size < 126) {
+    char header[2];
+    header[0] = 0b10000001;
+    header[1] = 0 << 7 | size;
+    send(fd, header, 2, 0);
+    send(fd, msg, size, 0);
+  } else {
+    // TODO
+    fprintf(stderr, "\033[0;31m[TODO] websocket_send (%s:%d)\033[0m\n", __FILE__, __LINE__);
+  }
+}
+
+void websocket_send_close(int fd) {
+  char header[2];
+  header[0] = 0b10001000;
+  header[1] = 0;
+  send(fd, header, 2, 0);
+}
+
+int websocket_decode_data_frame(int fd, void (*callback)(int fd, char *content, int opcode)) {
+  struct ws_header_s {
+    uint8_t fin; // 1
+    uint8_t rsv1; // 1
+    uint8_t rsv2; // 1
+    uint8_t rsv3; // 1
+    uint8_t opcode; // 4
+    uint8_t mask; // 1
+    uint8_t payload_len; // 7
+    union {
+      uint16_t ext_payload_len_1;
+      uint64_t ext_payload_len_2;
+    };
+    uint32_t mask_key;
+  };
+  struct ws_header_s header = {0};
+  char byte;
+  ssize_t nb_read = recv(fd, &byte, 1, MSG_WAITALL);
+  if (nb_read == 0) {
+    printf("websocket error (%d) -> closed\n", fd);
+    return 1;
+  }
+
+  header.fin = (byte >> 7) & 1;
+  header.rsv1 = (byte >> 6) & 1;
+  header.rsv2 = (byte >> 5) & 1;
+  header.rsv3 = (byte >> 4) & 1;
+  header.opcode = byte & 0xf;
+
+  if (header.rsv1 || header.rsv2 || header.rsv3) {
+    // FAIL
+    return 2;
+  }
+
+  nb_read = recv(fd, &byte, 1, MSG_WAITALL);
+  if (nb_read == 0) {
+    printf("websocket error (%d) -> closed\n", fd);
+    return 1;
+  }
+
+  header.mask = (byte >> 7) & 1;
+  header.payload_len = byte & 0x7f;
+
+  if (header.payload_len == 126) {
+    nb_read = recv(fd, &header.ext_payload_len_1, 2, MSG_WAITALL);
+    if (nb_read == 0) {
+      printf("websocket error (%d) -> closed\n", fd);
+      return 1;
+    }
+  } else if (header.payload_len == 127) {
+    nb_read = recv(fd, &header.ext_payload_len_2, 8, MSG_WAITALL);
+    if (nb_read == 0) {
+      printf("websocket error (%d) -> closed\n", fd);
+      return 1;
+    }
+  }
+
+  if (header.mask) {
+    nb_read = recv(fd, &header.mask_key, 4, MSG_WAITALL);
+    if (nb_read == 0) {
+      printf("websocket error (%d) -> closed\n", fd);
+      return 1;
+    }
+  }
+
+  char *buf = (char *)malloc(header.payload_len+1);
+  unsigned int off = 0;
+  while ((nb_read = read(fd, buf+off, header.payload_len - off)) > 0) {
+    for (int i = 0; i < nb_read; i++) {
+      int j = (i+off)%4;
+      buf[i] = buf[i] ^ ((header.mask_key >> (j*8)) & 0xff);
+    }
+    off = nb_read;
+    if (off == header.payload_len) {
+      goto end;
+    }
+  }
+  if (header.payload_len != 0) {
+    // Il y a des données à lire mais elle ne sont pas disponible
+    return 3;
+  }
+end:
+  buf[header.payload_len] = 0;
+  callback(fd, buf, header.opcode);
+  if (header.opcode == 8) {
+    websocket_send_close(fd);
+  }
+  free(buf);
+  return 0;
+}
+
+void websocket_init(int fd, request_t *request, void (*callback)(int fd, char *content, int opcode)) {
+  char *guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  for (int i = 0; i < request->nb_extra_headers; i++) {
+    if (strcmp(request->extra_headers[i][0], "Sec-WebSocket-Key") == 0) {
+      char *concat = (char *)malloc(strlen(request->extra_headers[i][1]) +
+                                    strlen(guid) + 1);
+      strcpy(concat, request->extra_headers[i][1]);
+      strcat(concat, guid);
+      char sha[21];
+      SHA1(sha, concat, strlen(concat));
+      char output[29];
+      int i = 0;
+      int o = 0;
+      while (i < 20) {
+        char n1 = (sha[i] & 0xfc) >> 2;
+        char n2 = ((sha[i] & 0x3) << 4) | ((sha[i + 1] & 0xf0) >> 4);
+        char n3 = ((sha[i + 1] & 0xf) << 2) | ((i + 2 != 20)?((sha[i + 2] & 0xc0) >> 6):0);
+        char n4 = (i + 2 != 20)?(sha[i + 2] & 0x3f):64;
+        i += 3;
+        BASE64(n1);
+        BASE64(n2);
+        BASE64(n3);
+        BASE64(n4);
+        output[o] = n1;
+        output[o + 1] = n2;
+        output[o + 2] = n3;
+        output[o + 3] = n4;
+        o += 4;
+      }
+      free(concat);
+      send(fd, "HTTP/1.1 101 Switching Protocols\n", 33, 0);
+      send(fd, "Upgrade: websocket\n", 19, 0);
+      send(fd, "Connection: Upgrade\n", 20, 0);
+      send(fd, "Sec-WebSocket-Accept: ", 22, 0);
+      send(fd, output, 28, 0);
+      /* send(fd, "\nSec-WebSocket-Protocol: chat\n", 30, 0); */
+      send(fd, "\r\n\r\n", 4, 0);
+    }
+  }
+  int end = 0;
+  do {
+    end = websocket_decode_data_frame(fd, callback);
+  } while(!end);
 }
 
 #endif // WEBLIB_IMPLEMENTATION
