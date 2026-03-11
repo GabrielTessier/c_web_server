@@ -656,9 +656,28 @@ void websocket_send(int fd, char *msg, size_t size) {
     header[1] = 0 << 7 | size;
     send(fd, header, 2, 0);
     send(fd, msg, size, 0);
+  } else if (size >= 126 && size <= 65535) {
+    char header[4];
+    header[0] = 0b10000001;
+    header[1] = 0 << 7 | 126;
+    header[2] = size >> 8;
+    header[3] = size & 0xff;
+    send(fd, header, 4, 0);
+    send(fd, msg, size, 0);
   } else {
-    // TODO
-    fprintf(stderr, "\033[0;31m[TODO] websocket_send (%s:%d)\033[0m\n", __FILE__, __LINE__);
+    char header[10];
+    header[0] = 0b10000001;
+    header[1] = 0 << 7 | 126;
+    header[2] = (size >> 56) & 0xff;
+    header[3] = (size >> 48) & 0xff;
+    header[4] = (size >> 40) & 0xff;
+    header[5] = (size >> 32) & 0xff;
+    header[6] = (size >> 24) & 0xff;
+    header[7] = (size >> 16) & 0xff;
+    header[8] = (size >> 8) & 0xff;
+    header[9] = size & 0xff;
+    send(fd, header, 10, 0);
+    send(fd, msg, size, 0);
   }
 }
 
@@ -700,6 +719,7 @@ int websocket_decode_data_frame(int fd, void (*callback)(int fd, char *content, 
 
   if (header.rsv1 || header.rsv2 || header.rsv3) {
     // FAIL
+    printf("websocket error (%d) -> closed\n", fd);
     return 2;
   }
 
@@ -712,18 +732,26 @@ int websocket_decode_data_frame(int fd, void (*callback)(int fd, char *content, 
   header.mask = (byte >> 7) & 1;
   header.payload_len = byte & 0x7f;
 
+  uint64_t len = header.payload_len;
+
   if (header.payload_len == 126) {
-    nb_read = recv(fd, &header.ext_payload_len_1, 2, MSG_WAITALL);
+    header.ext_payload_len_1 = 0;
+    uint8_t byte1, byte2;
+    nb_read = recv(fd, &byte1, 1, MSG_WAITALL);
+    nb_read = recv(fd, &byte2, 1, MSG_WAITALL);
+    header.ext_payload_len_1 = ((uint16_t)byte1) << 8 | byte2;
     if (nb_read == 0) {
       printf("websocket error (%d) -> closed\n", fd);
       return 1;
     }
+    len = header.ext_payload_len_1;
   } else if (header.payload_len == 127) {
     nb_read = recv(fd, &header.ext_payload_len_2, 8, MSG_WAITALL);
     if (nb_read == 0) {
       printf("websocket error (%d) -> closed\n", fd);
       return 1;
     }
+    len = header.ext_payload_len_2;
   }
 
   if (header.mask) {
@@ -734,24 +762,24 @@ int websocket_decode_data_frame(int fd, void (*callback)(int fd, char *content, 
     }
   }
 
-  char *buf = (char *)malloc(header.payload_len+1);
+  char *buf = (char *)malloc(len+1);
   unsigned int off = 0;
-  while ((nb_read = read(fd, buf+off, header.payload_len - off)) > 0) {
+  while ((nb_read = read(fd, buf+off, len - off)) > 0) {
     for (int i = 0; i < nb_read; i++) {
       int j = (i+off)%4;
       buf[i] = buf[i] ^ ((header.mask_key >> (j*8)) & 0xff);
     }
     off = nb_read;
-    if (off == header.payload_len) {
+    if (off == len) {
       goto end;
     }
   }
-  if (header.payload_len != 0) {
+  if (len != 0) {
     // Il y a des données à lire mais elle ne sont pas disponible
     return 3;
   }
 end:
-  buf[header.payload_len] = 0;
+  buf[len] = 0;
   callback(fd, buf, header.opcode);
   if (header.opcode == 8) {
     websocket_send_close(fd);
