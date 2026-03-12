@@ -1,3 +1,7 @@
+#+title: Implementation of a web server in C for HTTP/1.1 and WebSocket.
+
+* RFC
+Based on [[https://datatracker.ietf.org/doc/html/rfc2616][RFC 2616]] for HTTP/1.1 and [[https://datatracker.ietf.org/doc/html/rfc6455][RFC 6455]] for WebSocket.
 
 * How to use
 The library is self-contained in a single file like the [[https://github.com/nothings/stb][nothing/STB]] libraries. (not totally now =sha.c= and =string_lib.c= are in separate files, but in the future they will be self-contained in a single file)
