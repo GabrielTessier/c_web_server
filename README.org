@@ -1,0 +1,26 @@
+
+* How to use
+The library is self-contained in a single file like the [[https://github.com/nothings/stb][nothing/STB]] libraries.
+
+Add =#include "weblib.h"= to get all function declarations.
+
+To add implementation:
+#+begin_src c
+  #define WEBLIB_IMPLEMENTATION
+  #include "weblib.h"
+#+end_src
+
+* Test
+** Compile
+#+begin_src sh
+  make
+#+end_src
+
+** Run
+#+begin_src sh
+  make run
+#+end_src
+
+And open [[http://127.0.0.1:8001/test.html][127.0.0.1:8001/test.html]] in two windows.
+
+When you enter and push a message, it appears in all windows.
